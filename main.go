@@ -172,7 +172,18 @@ func createPodcastFeed() *podcast.Podcast {
 			continue
 		}
 
-		episodeTitle := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
+		baseName := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
+		mdPath := filepath.Join(cfg.AudioFolder, baseName+".md")
+
+		episodeTitle := baseName
+		episodeDescription := fmt.Sprintf("A podcast episode named %s.", episodeTitle)
+
+		if _, err := os.Stat(mdPath); err == nil {
+			// Markdown file exists, so we parse it
+			episodeTitle, episodeDescription = parseMarkdown(mdPath, baseName)
+		}
+
+		// Fallback to original title if markdown parsing fails to find one
 		pubDate := info.ModTime()
 		fileSize := info.Size()
 
@@ -182,7 +193,7 @@ func createPodcastFeed() *podcast.Podcast {
 
 		item := podcast.Item{
 			Title:       episodeTitle,
-			Description: fmt.Sprintf("A podcast episode named %s.", episodeTitle),
+			Description: episodeDescription,
 			PubDate:     &pubDate,
 			Enclosure: &podcast.Enclosure{
 				URL:    fileURL,
@@ -207,6 +218,32 @@ func createPodcastFeed() *podcast.Podcast {
 	}
 
 	return &p
+}
+
+// parseMarkdown reads a markdown file to extract a title (from the first H1 header)
+// and a description (the rest of the content).
+func parseMarkdown(filePath, fallbackTitle string) (title, description string) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Printf("Error reading markdown file %s: %v", filePath, err)
+		return fallbackTitle, fmt.Sprintf("A podcast episode named %s.", fallbackTitle)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var titleFound bool
+	var descLines []string
+
+	for _, line := range lines {
+		if !titleFound && strings.HasPrefix(line, "# ") {
+			title = strings.TrimSpace(strings.TrimPrefix(line, "# "))
+			titleFound = true
+		} else {
+			descLines = append(descLines, line)
+		}
+	}
+
+	description = strings.TrimSpace(strings.Join(descLines, "\n"))
+	return title, description
 }
 
 // formatDuration converts a time.Duration into the required HH:MM:SS string format.
