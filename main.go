@@ -8,11 +8,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"sync"
 
 	"github.com/abema/go-mp4"
 	"github.com/eduncan911/podcast"
@@ -27,6 +30,7 @@ type Config struct {
 	BaseURL      string `mapstructure:"base_url"`
 	AudioFolder  string `mapstructure:"audio_folder"`
 	FeedFileName string
+	SortMethod   string
 	Podcast      struct {
 		Title       string `mapstructure:"title"`
 		Description string `mapstructure:"description"`
@@ -37,17 +41,77 @@ type Config struct {
 		Category    string `mapstructure:"category"`
 		SubCategory string `mapstructure:"sub_category"`
 		Explicit    string `mapstructure:"explicit"`
+		Copyright   string `mapstructure:"copyright"`
+		Type        string `mapstructure:"type"` // episodic or serial
+		OwnerName   string `mapstructure:"owner_name"`
+		OwnerEmail  string `mapstructure:"owner_email"`
+		Image       string `mapstructure:"image"` // Optional remote URL override
 	} `mapstructure:"podcast"`
 }
 
-var cfg Config // Global to hold the configuration
+var (
+	cfg         Config
+	feedManager *FeedManager
+)
+
+// FeedManager handles the podcast feed and ensures thread-safe access.
+type FeedManager struct {
+	feed *podcast.Podcast
+	mu   sync.RWMutex
+}
+
+func (fm *FeedManager) Update(p *podcast.Podcast) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	fm.feed = p
+}
+
+func (fm *FeedManager) Get() *podcast.Podcast {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	return fm.feed
+}
 
 func main() {
 	useTailscale := flag.Bool("tailscale", false, "Enable Tailscale Funnel support")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging for Tailscale")
+	configPath := flag.String("config", "", "Path to the configuration file (optional)")
+	audioPath := flag.String("audio", "", "Path to the audio files directory (overrides config)")
+	portFlag := flag.String("port", "", "Port to listen on (overrides config)")
+	baseUrlFlag := flag.String("baseurl", "", "Base URL for the podcast (overrides config)")
+	sortMethod := flag.String("sort", "date", "Sort method: filename, date, or custom")
+	initConfig := flag.Bool("init", false, "Generate a default configuration file and exit")
 	flag.Parse()
 
-	loadConfig()
+	if *initConfig {
+		generateDefaultConfig(*configPath)
+		return
+	}
+
+	loadConfig(*configPath)
+
+	// Override audio folder if flag is provided
+	if *audioPath != "" {
+		cfg.AudioFolder = *audioPath
+	}
+	
+	// Override port if flag is provided
+	if *portFlag != "" {
+		cfg.Port = *portFlag
+	}
+	
+	// Override base URL if flag is provided
+	if *baseUrlFlag != "" {
+		cfg.BaseURL = *baseUrlFlag
+	}
+	
+	// Override sort method if flag is provided (or use default)
+	cfg.SortMethod = *sortMethod
+	
+	// Ensure audio folder defaults to ./audio if empty
+	if cfg.AudioFolder == "" {
+		cfg.AudioFolder = "./audio"
+	}
 
 	var listener net.Listener
 
@@ -116,12 +180,27 @@ func main() {
 		listener = ln
 	}
 
+	// Initialize FeedManager
+	feedManager = &FeedManager{}
+	
+	// Initial feed creation
 	p := createPodcastFeed()
+	feedManager.Update(p)
+
+	// Start watching for changes
+	go watchAudioFolder()
 
 	// 1. Handler for the RSS feed
 	http.HandleFunc("/"+cfg.FeedFileName, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		if err := p.Encode(w); err != nil {
+		
+		currentFeed := feedManager.Get()
+		if currentFeed == nil {
+			http.Error(w, "Feed not ready", http.StatusServiceUnavailable)
+			return
+		}
+		
+		if err := currentFeed.Encode(w); err != nil {
 			log.Printf("Error encoding feed: %v", err)
 			http.Error(w, "Could not generate feed", http.StatusInternalServerError)
 		}
@@ -132,9 +211,26 @@ func main() {
 	http.Handle("/episodes/", audioHandler)
 
 	// Logging based on configuration
-	serverPort := ":" + cfg.Port
+	serverPort := cfg.Port
+	if serverPort == "" {
+		// Try to parse port from BaseURL
+		u, err := url.Parse(cfg.BaseURL)
+		if err == nil {
+			serverPort = u.Port()
+		}
+		// If still empty (e.g. http://example.com), default to 8080
+		if serverPort == "" {
+			serverPort = "8080"
+		}
+	}
+	// Ensure it has a colon
+	if !strings.HasPrefix(serverPort, ":") {
+		serverPort = ":" + serverPort
+	}
+
 	if !*useTailscale {
 		log.Printf("Podcast Server running at %s", cfg.BaseURL)
+		log.Printf("Listening on port %s", serverPort)
 		log.Printf("RSS Feed URL: %s", cfg.Podcast.Link)
 	}
 	log.Printf("Serving files from local directory: %s", cfg.AudioFolder)
@@ -153,47 +249,63 @@ func main() {
 
 // setDefaults sets the initial, sensible default values for the application.
 func setDefaults(v *viper.Viper) {
-	v.SetDefault("port", "8080")
 	v.SetDefault("base_url", "http://localhost:8080")
 	v.SetDefault("audio_folder", "./audio")
-	v.SetDefault("podcast.title", "My Golang Powered Podcast")
+	v.SetDefault("podcast.title", "My Podcast")
 	v.SetDefault("podcast.description", "A podcast generated automatically from a folder of audio files.")
-	v.SetDefault("podcast.author", "The Go Gopher")
-	v.SetDefault("podcast.email", "gopher@golang.org")
+	v.SetDefault("podcast.author", "Podcast Author")
+	v.SetDefault("podcast.email", "podcastauthor@example.com")
 	v.SetDefault("podcast.language", "en-us")
 	v.SetDefault("podcast.category", "Technology")
 	v.SetDefault("podcast.sub_category", "Software Development")
 	v.SetDefault("podcast.explicit", "no")
+	v.SetDefault("podcast.type", "episodic")
+	v.SetDefault("podcast.copyright", "")
+	v.SetDefault("podcast.owner_name", "")
+	v.SetDefault("podcast.owner_email", "")
+	v.SetDefault("podcast.image", "")
 }
 
-// loadConfig initializes Viper, reads the configuration file,
-// and if not found, generates a default configuration file and exits.
-func loadConfig() {
+// loadConfig initializes Viper, reads the configuration file.
+// If path is empty, it looks for "config.yaml" in the current directory but doesn't create it if missing.
+// If path is provided, it tries to read it.
+func loadConfig(path string) {
 	v := viper.New()
 	setDefaults(v)
 
-	v.SetConfigName("config")
-	v.AddConfigPath(".")
-	v.SetConfigType("yaml")
+	if path != "" {
+		v.SetConfigFile(path)
+	} else {
+		v.SetConfigName("podcast-server")
+		v.AddConfigPath(".")
+		v.SetConfigType("yaml")
+	}
 
 	v.SetEnvPrefix("PODCAST")
 	v.AutomaticEnv()
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-			log.Println("Configuration file (config.yaml) not found. Generating default config.yaml.")
-
-			defaultConfigFile := "config.yaml"
-			if err := v.SafeWriteConfigAs(defaultConfigFile); err != nil {
-				log.Fatalf("Fatal error generating default config file: %s", err)
+			// Config file not found.
+			// If user specified a path, warn them.
+			// If default path, just log that we are using defaults.
+			if path != "" {
+				log.Printf("Warning: Configuration file %s not found. Using defaults.", path)
+			} else {
+				log.Println("No configuration file found. Using defaults and flags.")
 			}
-
-			log.Printf("Default configuration written to: %s.", defaultConfigFile)
-			log.Printf("Please edit this file (especially 'base_url') and restart the application.")
-
-			os.Exit(0)
 		} else {
-			log.Fatalf("Fatal error reading config file: %s", err)
+			// If the error is "file not found" but not the specific viper type (can happen with SetConfigFile), check os.Stat
+			if path != "" {
+				if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+					log.Printf("Warning: Configuration file %s not found. Using defaults.", path)
+				} else {
+					log.Fatalf("Fatal error reading config file: %s", err)
+				}
+			} else {
+				// Default path error (other than not found)
+				log.Fatalf("Fatal error reading config file: %s", err)
+			}
 		}
 	} else {
 		log.Printf("Configuration file loaded from: %s", v.ConfigFileUsed())
@@ -206,6 +318,25 @@ func loadConfig() {
 	cfg.BaseURL = strings.TrimSuffix(cfg.BaseURL, "/")
 	cfg.FeedFileName = "feed.xml"
 	cfg.Podcast.Link = cfg.BaseURL + "/" + cfg.FeedFileName
+}
+
+// generateDefaultConfig writes a default configuration file to the specified path (or config.yaml)
+func generateDefaultConfig(path string) {
+	v := viper.New()
+	setDefaults(v)
+	
+	targetPath := path
+	if targetPath == "" {
+		targetPath = "podcast-server.yaml"
+	}
+	
+	// We need to set the config type to yaml so SafeWriteConfigAs knows what to do if extension is missing
+	v.SetConfigType("yaml")
+
+	if err := v.SafeWriteConfigAs(targetPath); err != nil {
+		log.Fatalf("Error generating config file at %s: %v", targetPath, err)
+	}
+	log.Printf("Default configuration generated at: %s", targetPath)
 }
 
 // createPodcastFeed scans the audio directory and builds the RSS feed object.
@@ -226,14 +357,36 @@ func createPodcastFeed() *podcast.Podcast {
 	p.Language = cfg.Podcast.Language
 	p.IAuthor = cfg.Podcast.Author
 	p.IExplicit = cfg.Podcast.Explicit
+	p.Copyright = cfg.Podcast.Copyright // It is Copyright, not ICopyright
+	// p.Type is not supported by this library directly
+
+	
+	if cfg.Podcast.OwnerName != "" || cfg.Podcast.OwnerEmail != "" {
+		p.IOwner = &podcast.Author{
+			Name:  cfg.Podcast.OwnerName,
+			Email: cfg.Podcast.OwnerEmail,
+		}
+	} else {
+		// Fallback to main author/email if owner not specified
+		p.IOwner = &podcast.Author{
+			Name:  cfg.Podcast.Author,
+			Email: cfg.Podcast.Email,
+		}
+	}
 
 	// FIX 1: Correctly reference the SubCategory field from the nested struct
 	p.AddCategory(cfg.Podcast.Category, []string{cfg.Podcast.SubCategory})
 
 	// Add Podcast Image
-	defaultImage := findImage("default", cfg.AudioFolder)
-	if defaultImage != "" {
-		p.AddImage(cfg.BaseURL + "/episodes/" + defaultImage)
+	// Priority: 1. Config Image URL, 2. Local "default" image
+	var defaultImage string
+	if cfg.Podcast.Image != "" {
+		p.AddImage(cfg.Podcast.Image)
+	} else {
+		defaultImage = findImage("default", cfg.AudioFolder)
+		if defaultImage != "" {
+			p.AddImage(cfg.BaseURL + "/episodes/" + defaultImage)
+		}
 	}
 
 	// 2. Scan the audio folder for files
@@ -307,8 +460,41 @@ func createPodcastFeed() *podcast.Podcast {
 		episodes = append(episodes, &item)
 	}
 
+	// Load sort order if custom sort is selected
+	var sortOrder map[string]int
+	if cfg.SortMethod == "custom" {
+		sortOrder = loadSortOrder(filepath.Join(cfg.AudioFolder, "sort_order.txt"))
+	}
+
 	sort.Slice(episodes, func(i, j int) bool {
-		return episodes[i].Title < episodes[j].Title
+		switch cfg.SortMethod {
+		case "date":
+			// Newest first (descending)
+			return episodes[i].PubDate.After(*episodes[j].PubDate)
+		case "custom":
+			// Extract filenames from URL to match against sort_order.txt
+			// URL format: .../episodes/filename.mp3
+			file1 := filepath.Base(episodes[i].Enclosure.URL)
+			file2 := filepath.Base(episodes[j].Enclosure.URL)
+			
+			idx1, ok1 := sortOrder[file1]
+			idx2, ok2 := sortOrder[file2]
+			
+			if ok1 && ok2 {
+				return idx1 < idx2
+			}
+			if ok1 {
+				return true // 1 is in list, 2 is not -> 1 comes first
+			}
+			if ok2 {
+				return false // 2 is in list, 1 is not -> 2 comes first
+			}
+			// Fallback to filename sort for unlisted files
+			return episodes[i].Title < episodes[j].Title
+		default:
+			// Default to filename (Title) sort (A-Z)
+			return episodes[i].Title < episodes[j].Title
+		}
 	})
 
 	for _, item := range episodes {
@@ -523,4 +709,41 @@ func getEnclosureType(filename string) podcast.EnclosureType {
 	default:
 		return 99 // An invalid type that will be caught by AddItem validation
 	}
+}
+
+// watchAudioFolder periodically updates the feed.
+func watchAudioFolder() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	log.Printf("Feed auto-update enabled (every 5 minutes)")
+
+	for range ticker.C {
+		log.Println("Updating podcast feed...")
+		newFeed := createPodcastFeed()
+		feedManager.Update(newFeed)
+		log.Println("Podcast feed updated.")
+	}
+}
+
+// loadSortOrder reads the sort_order.txt file and returns a map of filename -> index.
+func loadSortOrder(path string) map[string]int {
+	order := make(map[string]int)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		// If file doesn't exist or error reading, return empty map (will fallback to filename sort)
+		if !os.IsNotExist(err) {
+			log.Printf("Error reading sort_order.txt: %v", err)
+		}
+		return order
+	}
+
+	lines := strings.Split(string(content), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			order[trimmed] = i
+		}
+	}
+	return order
 }
