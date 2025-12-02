@@ -2,7 +2,7 @@
 
 A simple, powerful podcast server written in Go. It automatically generates an RSS feed from a directory of audio files (`.mp3` and `.m4a`) and serves them via HTTP.
 
-It includes built-in support for **Tailscale Funnel**, allowing you to securely expose your podcast to the public internet with a single command-line flag, no port forwarding required.
+It includes built-in support for **Tailscale Funnel**, allowing you to securely expose your podcast via HTTPS to the public internet with a single command-line flag, no port forwarding required. Basically a reverse proxy baked in.
 
 ## Features
 
@@ -11,21 +11,21 @@ It includes built-in support for **Tailscale Funnel**, allowing you to securely 
 *   **Metadata Parsing**:
     *   Extracts duration automatically.
     *   Uses file modification time for publication date.
-    *   Supports sidecar `.md` files for custom titles and descriptions.
+    *   Supports sidecar `.md` files for custom titles and descriptions (first line `# Title`, rest is description).
     *   Supports per-episode images (same filename as audio, e.g., `episode1.jpg`).
-*   **Smart Sorting**: Episodes are sorted alphanumerically by title.
+*   **Flexible Sorting**: Episodes can be sorted by date (newest first), filename/title (A-Z), or a custom order.
 *   **Tailscale Funnel**: Built-in support to expose your server publicly via Tailscale.
 *   **State Persistence**: Persists Tailscale identity and certificates in a local state directory.
 
-## Installation
+## Getting Started
 
-### Build from Source
+### 1. Build from Source
 
 You need Go installed (1.20+ recommended).
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone {this repo}
 cd go-podcast-server
 
 # Build a static binary
@@ -74,7 +74,7 @@ Expose the podcast to the public internet using Tailscale Funnel.
 ```
 
 *   **First Run**: You will be prompted to authenticate with a URL.
-*   **Access**: The server will log the public URL, e.g., `https://podcast-server-v2.tailnet-name.ts.net/feed.xml`.
+*   **Access**: The server will log the public URL, e.g., `https://my-podcast-server.tailnet-name.ts.net/feed.xml`.
 *   **Requirements**: You must enable **Funnel** for the node in your Tailscale Admin Console (Access Controls and Machine Settings).
 
 ### Other Flags
