@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net"
@@ -189,6 +190,17 @@ func main() {
 
 	// Start watching for changes
 	go watchAudioFolder()
+
+	// 0. Handler for the HTML landing page (root path)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Only handle exact root path
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		
+		serveIndexPage(w, r)
+	})
 
 	// 1. Handler for the RSS feed
 	http.HandleFunc("/"+cfg.FeedFileName, func(w http.ResponseWriter, r *http.Request) {
@@ -747,3 +759,167 @@ func loadSortOrder(path string) map[string]int {
 	}
 	return order
 }
+
+// EpisodeData represents an episode for the HTML template
+type EpisodeData struct {
+	Title       string
+	Description string
+	PubDate     string
+	Duration    string
+	AudioURL    string
+	ImageURL    string
+}
+
+// IndexPageData represents the data for the index page template
+type IndexPageData struct {
+	PodcastTitle       string
+	PodcastDescription string
+	PodcastImage       string
+	FeedURL            string
+	Episodes           []EpisodeData
+	CurrentPage        int
+	TotalPages         int
+	TotalEpisodes      int
+	PageNumbers        []int
+}
+
+// serveIndexPage handles the root path and renders the HTML landing page
+func serveIndexPage(w http.ResponseWriter, r *http.Request) {
+	// Parse template with custom functions
+	funcMap := template.FuncMap{
+		"sub": func(a, b int) int { return a - b },
+		"add": func(a, b int) int { return a + b },
+	}
+	
+	tmpl, err := template.New("index.html").Funcs(funcMap).ParseFiles("templates/index.html")
+	if err != nil {
+		log.Printf("Error parsing template: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Get current feed
+	currentFeed := feedManager.Get()
+	if currentFeed == nil {
+		http.Error(w, "Feed not ready", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract episodes from feed
+	var episodes []EpisodeData
+	for _, item := range currentFeed.Items {
+		pubDate := ""
+		if item.PubDate != nil {
+			pubDate = item.PubDate.Format("Jan 2, 2006")
+		}
+
+		imageURL := ""
+		if item.IImage != nil {
+			imageURL = item.IImage.HREF
+		}
+
+		audioURL := ""
+		if item.Enclosure != nil {
+			audioURL = item.Enclosure.URL
+		}
+
+		episodes = append(episodes, EpisodeData{
+			Title:       item.Title,
+			Description: item.Description,
+			PubDate:     pubDate,
+			Duration:    item.IDuration,
+			AudioURL:    audioURL,
+			ImageURL:    imageURL,
+		})
+	}
+
+	// Pagination
+	const episodesPerPage = 10
+	page := 1
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := fmt.Sscanf(pageStr, "%d", &page); err == nil && p == 1 {
+			if page < 1 {
+				page = 1
+			}
+		}
+	}
+
+	totalEpisodes := len(episodes)
+	totalPages := (totalEpisodes + episodesPerPage - 1) / episodesPerPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	// Calculate pagination range
+	start := (page - 1) * episodesPerPage
+	end := start + episodesPerPage
+	if end > totalEpisodes {
+		end = totalEpisodes
+	}
+
+	var paginatedEpisodes []EpisodeData
+	if totalEpisodes > 0 {
+		paginatedEpisodes = episodes[start:end]
+	}
+
+	// Generate page numbers for pagination (show max 7 pages)
+	pageNumbers := generatePageNumbers(page, totalPages)
+
+	// Get podcast image
+	podcastImage := ""
+	if currentFeed.IImage != nil {
+		podcastImage = currentFeed.IImage.HREF
+	}
+
+	data := IndexPageData{
+		PodcastTitle:       currentFeed.Title,
+		PodcastDescription: currentFeed.Description,
+		PodcastImage:       podcastImage,
+		FeedURL:            cfg.Podcast.Link,
+		Episodes:           paginatedEpisodes,
+		CurrentPage:        page,
+		TotalPages:         totalPages,
+		TotalEpisodes:      totalEpisodes,
+		PageNumbers:        pageNumbers,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, data); err != nil {
+		log.Printf("Error executing template: %v", err)
+	}
+}
+
+// generatePageNumbers creates a slice of page numbers for pagination display
+// Shows up to 7 pages with current page in the middle when possible
+func generatePageNumbers(currentPage, totalPages int) []int {
+	if totalPages <= 7 {
+		pages := make([]int, totalPages)
+		for i := range pages {
+			pages[i] = i + 1
+		}
+		return pages
+	}
+
+	// Show 7 pages max
+	var pages []int
+	start := currentPage - 3
+	end := currentPage + 3
+
+	if start < 1 {
+		start = 1
+		end = 7
+	}
+	if end > totalPages {
+		end = totalPages
+		start = totalPages - 6
+	}
+
+	for i := start; i <= end; i++ {
+		pages = append(pages, i)
+	}
+	return pages
+}
+
