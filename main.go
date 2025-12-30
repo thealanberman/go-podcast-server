@@ -35,6 +35,8 @@ type Config struct {
 	AudioFolder  string `mapstructure:"audio_folder"`
 	FeedFileName string
 	SortMethod   string
+	Tailscale    bool `mapstructure:"tailscale"`
+	Verbose      bool `mapstructure:"verbose"`
 	Podcast      struct {
 		Title       string `mapstructure:"title"`
 		Description string `mapstructure:"description"`
@@ -117,6 +119,16 @@ func main() {
 	// Override sort method if flag is provided (or use default)
 	cfg.SortMethod = *sortMethod
 	
+	// Override Tailscale if flag is provided
+	if *useTailscale {
+		cfg.Tailscale = true
+	}
+	
+	// Override Verbose if flag is provided
+	if *verbose {
+		cfg.Verbose = true
+	}
+
 	// Ensure audio folder defaults to ./audio if empty
 	if cfg.AudioFolder == "" {
 		cfg.AudioFolder = "./audio"
@@ -128,7 +140,7 @@ func main() {
 
 	var listener net.Listener
 
-	if *useTailscale {
+	if cfg.Tailscale {
 		hostname := "podcast-server"
 		
 		// Store state alongside config.yaml in the current directory
@@ -143,7 +155,7 @@ func main() {
 			Dir:      stateDir,
 			Logf:     func(format string, args ...any) {}, // Quiet logs by default
 		}
-		if *verbose {
+		if cfg.Verbose {
 			s.Logf = log.Printf
 		}
 		defer s.Close()
@@ -252,7 +264,7 @@ func main() {
 		serverPort = ":" + serverPort
 	}
 
-	if !*useTailscale {
+	if !cfg.Tailscale {
 		log.Printf("Podcast Server running at %s", cfg.BaseURL)
 		log.Printf("Listening on port %s", serverPort)
 		log.Printf("RSS Feed URL: %s", cfg.Podcast.Link)
@@ -260,7 +272,7 @@ func main() {
 	log.Printf("Serving files from local directory: %s", cfg.AudioFolder)
 
 	// Start the server
-	if *useTailscale {
+	if cfg.Tailscale {
 		if err := http.Serve(listener, nil); err != nil {
 			log.Fatal(err)
 		}
@@ -275,6 +287,8 @@ func main() {
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("base_url", "http://localhost:8080")
 	v.SetDefault("audio_folder", "./audio")
+	v.SetDefault("tailscale", false)
+	v.SetDefault("verbose", false)
 	v.SetDefault("podcast.title", "My Podcast")
 	v.SetDefault("podcast.description", "A podcast generated automatically from a folder of audio files.")
 	v.SetDefault("podcast.author", "Podcast Author")
