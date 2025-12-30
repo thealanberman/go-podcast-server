@@ -28,8 +28,14 @@ You need Go installed (1.20+ recommended).
 git clone <your-repo-url>
 cd go-podcast-server
 
-# Build a static binary
+# Build a static binary for the current platform
 CGO_ENABLED=0 go build -o go-podcast-server .
+
+# Build a static binary for Raspberry Pi (ARM64)
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o go-podcast-server-pi .
+
+# Build a static binary for Linux AMD64
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o go-podcast-server-linux-amd64 .
 ```
 
 ## Configuration
